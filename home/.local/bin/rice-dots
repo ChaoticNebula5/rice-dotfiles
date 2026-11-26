@@ -1,0 +1,217 @@
+#!/usr/bin/env bash
+# rice-dots: back up the whole rice to a PRIVATE GitHub repo, and restore it on a fresh install.
+#
+#   rice-dots init        first time: sign in to GitHub, create the private repo, first backup
+#   rice-dots backup      copy current configs into ~/dotfiles, commit and push (safe to run any time)
+#   rice-dots status      show what changed since the last backup
+#   rice-dots restore     on a fresh install: download the repo and put every config back
+#
+# Never backed up: browser profiles, passwords, keys, tokens, shell history, caches.
+set -u
+REPO_NAME="${RICE_DOTS_REPO:-rice-dotfiles}"
+DOTS="${RICE_DOTS_DIR:-$HOME/dotfiles}"
+TS="$(date +%Y-%m-%d\ %H:%M)"
+
+PATHS=(
+    .config/hypr
+    .config/caelestia
+    .config/waybar
+    .config/kitty
+    .config/fastfetch
+    .config/btop/btop.conf
+    .config/starship.toml
+    .config/rice
+    .zshrc
+    .zshrc.local
+    .face
+    .local/bin/rice
+    .local/bin/rice-sync
+    .local/bin/rice-clock
+    .local/bin/rice-autostart
+    .local/bin/rice-shell-patch
+    .local/bin/rice-boot
+    .local/bin/rice-dots
+    .local/share/applications/brave-browser.desktop
+)
+EXCLUDES=(--exclude '*.bak' --exclude '*.bak[0-9]*' --exclude '*.rice-bak' --exclude '*.rice-tmp'
+          --exclude '*.log' --exclude '.git' --exclude '__pycache__' --exclude 'state/firstrun')
+
+c1=$'\033[1;35m'; c2=$'\033[32m'; c3=$'\033[33m'; c0=$'\033[0m'
+step() { printf '\n%s==> %s%s\n' "$c1" "$*" "$c0"; }
+ok()   { printf '   %sOK%s  %s\n' "$c2" "$c0" "$*"; }
+warn() { printf '   %s!!%s  %s\n' "$c3" "$c0" "$*"; }
+die()  { printf '%s!! %s%s\n' "$c3" "$*" "$c0"; exit 1; }
+
+[ "$(id -u)" = 0 ] && [ -z "${RICE_TEST:-}" ] && die "Run as yourself, not with sudo."
+
+need_tools() {
+    local miss=()
+    for t in git rsync gh; do command -v "$t" >/dev/null || miss+=("$t"); done
+    if [ ${#miss[@]} -gt 0 ]; then
+        echo "   installing: ${miss[*]}"
+        sudo dnf install -y "${miss[@]}" || die "could not install ${miss[*]}"
+    fi
+}
+
+gh_login() {
+    if gh auth status >/dev/null 2>&1; then ok "signed in to GitHub as $(gh api user --jq .login 2>/dev/null)"; return; fi
+    echo "   A browser window will open. Sign in to GitHub there and enter the code shown below."
+    gh auth login --web --git-protocol https --hostname github.com || die "GitHub sign-in did not finish"
+    gh auth setup-git >/dev/null 2>&1
+    ok "signed in as $(gh api user --jq .login)"
+}
+
+git_identity() {
+    git -C "$DOTS" config user.name >/dev/null 2>&1 && return
+    local login id
+    login="$(gh api user --jq .login 2>/dev/null)"; id="$(gh api user --jq .id 2>/dev/null)"
+    git -C "$DOTS" config user.name "${login:-$USER}"
+    git -C "$DOTS" config user.email "${id:-0}+${login:-$USER}@users.noreply.github.com"
+}
+
+write_meta() {
+    mkdir -p "$DOTS/system"
+    { command -v dnf >/dev/null && dnf repoquery --userinstalled --queryformat '%{name}\n' 2>/dev/null | sort -u; } > "$DOTS/system/packages.txt" || true
+    { dnf copr list 2>/dev/null || true; } > "$DOTS/system/coprs.txt"
+    {
+        echo "# What the login screen / boot setup looked like (restore with: rice-boot)"
+        echo "plymouth=$(plymouth-set-default-theme 2>/dev/null || echo unknown)"
+        echo "display_manager=$(systemctl is-enabled sddm 2>/dev/null | grep -q enabled && echo sddm || echo plasmalogin)"
+        grep -E '^GRUB_(THEME|TIMEOUT|GFXMODE|TERMINAL_OUTPUT|TIMEOUT_STYLE)=' /etc/default/grub 2>/dev/null
+    } > "$DOTS/system/boot.txt"
+    cat > "$DOTS/README.md" <<'EOF'
+# rice-dotfiles
+
+Fedora + Hyprland rice: Caelestia shell, LeyzS bar/panels, 43PR terminal. Private backup made by `rice-dots`.
+
+## Restore on a fresh Fedora install
+1. Install Hyprland and build the Caelestia shell + CLI (the long manual part).
+2. `gh repo clone rice-dotfiles ~/dotfiles && bash ~/dotfiles/home/.local/bin/rice-dots restore`
+3. `sudo dnf install --skip-unavailable $(cat ~/dotfiles/system/packages.txt)`
+4. `rice-shell-patch` (solid panels, clickable Waybar, wallpaper arrows), then `rice-boot` (login/boot themes).
+5. Log out and pick Hyprland.
+
+`home/` mirrors your home folder. `system/` holds the package list and boot settings for reference.
+EOF
+    printf '*.bak\n*.rice-bak\n*.log\n__pycache__/\n' > "$DOTS/.gitignore"
+}
+
+secret_check() {
+    local hits
+    hits=$(grep -rIniE '(api[_-]?key|access[_-]?token|secret[_-]?key|client[_-]?secret|ghp_[A-Za-z0-9]{20,}|BEGIN [A-Z ]*PRIVATE KEY)' "$DOTS/home" 2>/dev/null | head -10)
+    if [ -n "$hits" ]; then
+        warn "possible secrets found, nothing was pushed:"
+        echo "$hits" | sed 's/^/        /'
+        echo "   Remove them from the file (or add the file to .gitignore), then run: rice-dots backup"
+        exit 1
+    fi
+}
+
+sync_in() {
+    mkdir -p "$DOTS/home"
+    local n=0
+    for p in "${PATHS[@]}"; do
+        local src="$HOME/$p" dst="$DOTS/home/$p"
+        if [ -e "$src" ]; then
+            mkdir -p "$(dirname "$dst")"
+            if [ -d "$src" ]; then rsync -a --delete "${EXCLUDES[@]}" "$src/" "$dst/"
+            else rsync -a "$src" "$dst"; fi
+            n=$((n + 1))
+        elif [ -e "$dst" ]; then
+            rm -rf "$dst"
+        fi
+    done
+    ok "$n items copied into $DOTS"
+}
+
+cmd_init() {
+    step "1/4  Tools + GitHub sign-in"
+    need_tools
+    gh_login
+
+    step "2/4  Local folder $DOTS"
+    mkdir -p "$DOTS"
+    [ -d "$DOTS/.git" ] || git -C "$DOTS" init -q -b main
+    git_identity
+    write_meta
+    sync_in
+    secret_check
+    git -C "$DOTS" add -A
+    git -C "$DOTS" commit -q -m "First backup ($TS)" && ok "first commit made" || ok "nothing new to commit"
+
+    step "3/4  Private repo on GitHub"
+    if git -C "$DOTS" remote get-url origin >/dev/null 2>&1; then
+        ok "already linked to $(git -C "$DOTS" remote get-url origin)"
+    elif gh repo view "$REPO_NAME" >/dev/null 2>&1; then
+        warn "a repo called '$REPO_NAME' already exists on your account"
+        echo "   Run again with another name, e.g.:  RICE_DOTS_REPO=my-rice rice-dots init"
+        exit 1
+    else
+        gh repo create "$REPO_NAME" --private --source "$DOTS" --remote origin \
+            --description "Fedora Hyprland rice (private backup)" || die "could not create the repo"
+        ok "created private repo $REPO_NAME"
+    fi
+
+    step "4/4  Uploading"
+    git -C "$DOTS" push -q -u origin main && ok "uploaded" || die "push failed"
+    local url; url="$(gh repo view "$REPO_NAME" --json url --jq .url 2>/dev/null)"
+    printf '\n%s==> Done.%s Your rice is backed up (private): %s\n' "$c1" "$c0" "${url:-$REPO_NAME}"
+    echo "After changing anything, run:  rice-dots backup"
+}
+
+cmd_backup() {
+    [ -d "$DOTS/.git" ] || die "not set up yet: run  rice-dots init"
+    write_meta
+    sync_in
+    secret_check
+    git -C "$DOTS" add -A
+    if git -C "$DOTS" diff --cached --quiet; then ok "no changes since the last backup"; return; fi
+    git -C "$DOTS" diff --cached --stat | tail -1 | sed 's/^/   /'
+    git -C "$DOTS" commit -q -m "Backup $TS"
+    git -C "$DOTS" push -q && ok "backed up and uploaded" || warn "saved locally, upload failed (try again when online)"
+}
+
+cmd_status() {
+    [ -d "$DOTS/.git" ] || die "not set up yet: run  rice-dots init"
+    local tmp; tmp="$(mktemp -d)"
+    cp -a "$DOTS/." "$tmp/"
+    DOTS="$tmp" sync_in >/dev/null
+    git -C "$tmp" add -A
+    if git -C "$tmp" diff --cached --quiet; then echo "Nothing changed since the last backup."
+    else echo "Changed since the last backup:"; git -C "$tmp" diff --cached --stat | sed 's/^/   /'; fi
+    rm -rf "$tmp"
+}
+
+cmd_restore() {
+    need_tools
+    if [ ! -d "$DOTS/.git" ]; then
+        gh_login
+        gh repo clone "$REPO_NAME" "$DOTS" || die "could not download '$REPO_NAME'"
+    fi
+    step "Saving your current configs first"
+    local keep have=()
+    keep="$HOME/.local/share/rice/pre-restore-$(date +%Y%m%d-%H%M%S).tar.gz"
+    mkdir -p "$(dirname "$keep")"
+    for p in "${PATHS[@]}"; do [ -e "$HOME/$p" ] && have+=("$p"); done
+    [ ${#have[@]} -gt 0 ] && tar -czf "$keep" -C "$HOME" "${have[@]}" && ok "saved in $keep"
+    step "Putting the rice back"
+    rsync -a "$DOTS/home/" "$HOME/"
+    chmod +x "$HOME"/.local/bin/rice* 2>/dev/null
+    ok "configs restored"
+    cat <<EOF
+
+Next:
+  1. Missing apps:      sudo dnf install --skip-unavailable \$(cat $DOTS/system/packages.txt)
+  2. Caelestia edits:   rice-shell-patch      (needs the Caelestia shell already installed)
+  3. Login/boot looks:  rice-boot
+  4. Log out and pick Hyprland.
+EOF
+}
+
+case "${1:-}" in
+    init) cmd_init ;;
+    backup) cmd_backup ;;
+    status) cmd_status ;;
+    restore) cmd_restore ;;
+    *) sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//' ;;
+esac

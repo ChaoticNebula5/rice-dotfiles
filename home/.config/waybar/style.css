@@ -1,0 +1,69 @@
+/* LeyzS-style pills, colours from the Caelestia wallpaper scheme (colors.css by rice-sync) */
+@import "colors.css";
+
+* {
+  font-family: "Cascadia Code NF";
+  font-size: 13.5px;
+  font-weight: 500;
+  border: none;
+  min-height: 0;
+}
+
+window#waybar { background: transparent; }
+
+tooltip {
+  background: @background;
+  border: 1px solid @border;
+  border-radius: 14px;
+}
+tooltip label { color: @foreground; padding: 4px 6px; }
+
+#custom-launcher, #clock, #pulseaudio, #mpris, #cpu, #memory, #network, #battery,
+#tray, #custom-power, #workspaces, #taskbar {
+  background-color: @background;
+  color: @foreground;
+  border-radius: 18px;
+  border: 1px solid @border;
+  padding: 0 15px;
+  margin: 3px 3px;
+  transition: all 0.25s ease;
+}
+
+#custom-launcher { color: @color9; padding: 0 14px 0 12px; }
+#clock { font-weight: 700; }
+#mpris { color: @dim; }
+
+#workspaces { padding: 0 4px; }
+#workspaces button {
+  color: @dim;
+  background: transparent;
+  border-radius: 14px;
+  min-width: 22px;
+  padding: 0 6px;
+  margin: 4px 1px;
+  transition: all 0.25s ease;
+}
+#workspaces button.active {
+  background: @color9;
+  color: @onaccent;
+  min-width: 34px;
+}
+#workspaces button:hover { background: @border; color: @foreground; box-shadow: none; }
+
+#taskbar { padding: 0 4px; }
+#taskbar.empty { background: transparent; border: none; padding: 0; margin: 0; }
+#taskbar button { padding: 0 6px; margin: 3px 1px; border-radius: 12px; background: transparent; }
+#taskbar button.active { background: @border; }
+#taskbar button:hover { background: @border; box-shadow: none; }
+
+#custom-launcher:hover, #clock:hover, #pulseaudio:hover, #cpu:hover, #memory:hover,
+#network:hover, #battery:hover, #custom-power:hover {
+  background-color: @color9;
+  color: @onaccent;
+  border-color: @color9;
+}
+
+#custom-power { color: @color10; padding: 0 14px; }
+#battery.warning:not(.charging) { border-color: @color10; color: @color10; }
+#battery.critical:not(.charging) { border-color: #f7768e; color: #f7768e; }
+#pulseaudio.muted { color: @dim; }

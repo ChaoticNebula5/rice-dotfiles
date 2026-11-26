@@ -1,0 +1,30 @@
+{
+  "appearance": {
+    "transparency": {
+      "base": 0.5,
+      "enabled": true,
+      "layers": 0.7
+    }
+  },
+  "bar": {
+    "persistent": true,
+    "showOnHover": true
+  },
+  "general": {
+    "idle": {
+      "lockBeforeSleep": false,
+      "timeouts": []
+    }
+  },
+  "paths": {
+    "mediaGif": "",
+    "sessionGif": ""
+  },
+  "services": {
+    "sensorUnits": "Celsius",
+    "weatherUnits": "Celsius"
+  },
+  "border": {
+    "thickness": 0
+  }
+}

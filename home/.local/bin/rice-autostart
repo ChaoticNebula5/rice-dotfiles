@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Started once by Hyprland (from execs.lua, right after the Caelestia shell).
+BIN="$HOME/.local/bin"
+RICE="$HOME/.config/rice"
+
+# First login after install: make Caelestia colours follow the wallpaper
+if [ -f "$RICE/state/firstrun" ]; then
+    sleep 3
+    caelestia scheme set -n dynamic >/dev/null 2>&1
+    rm -f "$RICE/state/firstrun"
+fi
+
+# Colours -> Waybar/kitty/cava/hyprlock, then keep watching for wallpaper changes
+pkill -f "waybar/watch.sh" 2>/dev/null
+pkill -f "rice-sync watch" 2>/dev/null
+python3 "$BIN/rice-sync" once
+nohup python3 "$BIN/rice-sync" watch >/dev/null 2>&1 &
+
+# LeyzS-style top bar
+pkill -x waybar 2>/dev/null
+sleep 0.5
+nohup waybar >/dev/null 2>&1 &
+
+# Unlock KWallet with the login password (Plasma does this itself; Hyprland doesn't)
+for p in /usr/libexec/pam_kwallet_init /usr/lib/pam_kwallet_init /usr/libexec/kf6/pam_kwallet_init; do
+    [ -x "$p" ] && { "$p" >/dev/null 2>&1 & break; }
+done
+
+# Idle: lock after 5 min, screen off, suspend (hypridle.conf)
+if command -v hypridle >/dev/null && ! pgrep -x hypridle >/dev/null; then
+    nohup hypridle >/dev/null 2>&1 &
+fi
+
+# Watchdog: if the Caelestia shell did not come up (seen after logging in through SDDM), start it again
+( sleep 8; pgrep -f -- "-c caelestia" >/dev/null || caelestia shell -d >"$HOME/.local/share/rice/shell-retry.log" 2>&1 ) &

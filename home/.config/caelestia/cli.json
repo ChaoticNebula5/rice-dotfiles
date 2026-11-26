@@ -1,0 +1,62 @@
+{
+  "toggles": {
+    "hud": {
+      "sys": {
+        "enable": true,
+        "match": [
+          {
+            "class": "rice-sys"
+          }
+        ],
+        "command": [
+          "/home/dhruv/.local/bin/rice",
+          "panel",
+          "sys"
+        ],
+        "move": true
+      },
+      "rain": {
+        "enable": true,
+        "match": [
+          {
+            "class": "rice-rain"
+          }
+        ],
+        "command": [
+          "/home/dhruv/.local/bin/rice",
+          "panel",
+          "rain"
+        ],
+        "move": true
+      },
+      "clock": {
+        "enable": true,
+        "match": [
+          {
+            "class": "rice-clock"
+          }
+        ],
+        "command": [
+          "/home/dhruv/.local/bin/rice",
+          "panel",
+          "clock"
+        ],
+        "move": true
+      },
+      "wave": {
+        "enable": true,
+        "match": [
+          {
+            "class": "rice-wave"
+          }
+        ],
+        "command": [
+          "/home/dhruv/.local/bin/rice",
+          "panel",
+          "wave"
+        ],
+        "move": true
+      }
+    }
+  }
+}

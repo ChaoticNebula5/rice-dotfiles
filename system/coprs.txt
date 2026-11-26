@@ -1,0 +1,2 @@
+copr.fedorainfracloud.org/ashbuk/Hyprland-Fedora
+copr.fedorainfracloud.org/atim/starship

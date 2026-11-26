@@ -1,0 +1,8 @@
+# What the login screen / boot setup looked like (restore with: rice-boot)
+plymouth=hexagon_dots
+display_manager=sddm
+GRUB_TIMEOUT=5
+GRUB_TERMINAL_OUTPUT="gfxterm"
+GRUB_THEME="/boot/grub2/themes/rice/theme.txt"
+GRUB_GFXMODE="auto"
+GRUB_TIMEOUT_STYLE="menu"

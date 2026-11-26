@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+# rice: small control panel for the Caelestia + LeyzS + 43PR setup
+RICE="$HOME/.config/rice"
+STATE="$RICE/state"
+mkdir -p "$STATE"
+
+usage() {
+cat <<'EOF'
+rice keys                     show the keybind cheat sheet
+rice hud                      show/hide the panel grid (same as Super+G)
+rice bar hover|always         Caelestia left bar: slide in on hover, or always visible
+rice vibrance on|off|toggle   LeyzS colour-boost shader
+rice borders on|off|toggle    animated gradient window borders
+rice pfp /path/to/image       set your profile picture (lock screen + dashboard)
+rice wallpaper                open Caelestia's wallpaper picker
+rice sync                     re-apply wallpaper colours to Waybar, kitty, cava, lock screen
+rice restart                  restart Caelestia shell + Waybar
+rice doctor                   check that every piece is running
+rice undo                     put back the files from before the rice install
+EOF
+}
+
+reload_hypr() { command -v hyprctl >/dev/null && [ -n "$HYPRLAND_INSTANCE_SIGNATURE" ] && hyprctl reload >/dev/null; }
+
+flip() { # name value|toggle
+    local cur; cur=$(cat "$STATE/$1" 2>/dev/null || echo on)
+    local new="$2"
+    [ "$new" = toggle ] && { [ "$cur" = on ] && new=off || new=on; }
+    case "$new" in on|off) ;; *) echo "use on, off or toggle"; exit 1;; esac
+    echo "$new" > "$STATE/$1"
+    reload_hypr
+    command -v notify-send >/dev/null && notify-send -a rice "$1: $new" 2>/dev/null
+    echo "$1: $new"
+}
+
+global() { # caelestia global shortcut
+    local out; out=$(hyprctl dispatch "hl.dsp.global(\"caelestia:$1\")" 2>&1)
+    case "$out" in *ok*) return 0;; esac
+    caelestia shell drawers toggle "$1" >/dev/null 2>&1
+}
+
+panel() {
+    local common=(-o background_opacity=0.30 -o window_padding_width=8 -o cursor_trail=0 -o confirm_os_window_close=0)
+    case "$1" in
+        sys)   exec kitty --class rice-sys   "${common[@]}" -o font_size=10 btop ;;
+        rain)  exec kitty --class rice-rain  "${common[@]}" -o font_size=10 cmatrix -b -u 7 -C blue ;;
+        clock) exec kitty --class rice-clock "${common[@]}" -o font_size=9 python3 "$HOME/.local/bin/rice-clock" ;;
+        wave)  exec kitty --class rice-wave  "${common[@]}" -o font_size=10 cava -p "$RICE/cava.conf" ;;
+        *) echo "panels: sys rain clock wave"; exit 1 ;;
+    esac
+}
+
+case "$1" in
+    keys) cat "$RICE/KEYS.txt" ;;
+    hud)
+        if caelestia toggle hud 2>/dev/null; then exit 0; fi
+        for p in sys rain clock wave; do
+            hyprctl clients 2>/dev/null | grep -q "class: rice-$p" || ("$0" panel "$p" >/dev/null 2>&1 &)
+        done ;;
+    panel) panel "$2" ;;
+    vibrance) flip vibrance "${2:-toggle}" ;;
+    borders) flip borders "${2:-toggle}" ;;
+    bar)
+        case "$2" in hover|always) ;; *) echo "rice bar hover|always"; exit 1;; esac
+        echo "$2" > "$STATE/bar"
+        python3 - "$2" <<'PY'
+import json, os, sys
+p = os.path.expanduser("~/.config/caelestia/shell.json")
+try: d = json.load(open(p))
+except Exception: d = {}
+bar = d.setdefault("bar", {})
+bar["persistent"] = sys.argv[1] == "always"
+bar["showOnHover"] = True
+json.dump(d, open(p, "w"), indent=2)
+PY
+        reload_hypr
+        echo "Caelestia bar: $2" ;;
+    pfp)
+        [ -f "$2" ] || { echo "rice pfp /path/to/image"; exit 1; }
+        cp "$2" "$HOME/.face" && echo "Profile picture set (~/.face)." ;;
+    wallpaper) global wallpaper || echo "Open the launcher and type: >wallpaper" ;;
+    open) global "$2" ;;
+    sync) python3 "$HOME/.local/bin/rice-sync" once && echo "Colours re-applied." ;;
+    restart)
+        caelestia shell -r -d >/dev/null 2>&1 || (caelestia shell -d >/dev/null 2>&1 &)
+        bash "$HOME/.local/bin/rice-autostart" >/dev/null 2>&1 &
+        echo "Restarted." ;;
+    lock) pidof hyprlock >/dev/null || hyprlock ;;
+    doctor)
+        ok() { printf '  \033[32mOK\033[0m   %s\n' "$1"; }
+        bad() { printf '  \033[31m!!\033[0m   %s\n' "$1"; }
+        echo "Session"
+        [ -n "$HYPRLAND_INSTANCE_SIGNATURE" ] && ok "inside Hyprland" || bad "not inside Hyprland (run this in Hyprland)"
+        if [ -n "$HYPRLAND_INSTANCE_SIGNATURE" ]; then
+            errs=$(hyprctl configerrors 2>/dev/null | grep -v '^\s*$')
+            [ -z "$errs" ] && ok "no Hyprland config errors" || { bad "Hyprland config errors:"; echo "$errs" | sed 's/^/        /'; }
+        fi
+        echo "Pieces"
+        for p in qs:"Caelestia shell" waybar:"Waybar" hypridle:"idle/lock daemon"; do
+            pgrep -x "${p%%:*}" >/dev/null && ok "${p#*:} running" || bad "${p#*:} not running"
+        done
+        pgrep -f "rice-sync watch" >/dev/null && ok "colour sync running" || bad "colour sync not running (rice restart)"
+        name=$(python3 -c 'import json,os;print(json.load(open(os.path.expanduser("~/.local/state/caelestia/scheme.json"))).get("name",""))' 2>/dev/null)
+        [ "$name" = dynamic ] && ok "colours follow the wallpaper (scheme: dynamic)" || bad "scheme is '$name', not dynamic: caelestia scheme set -n dynamic"
+        for t in kitty zsh hyprlock btop cava cmatrix starship; do
+            command -v "$t" >/dev/null && ok "$t installed" || bad "$t missing"
+        done
+        echo "Brave"
+        grep -qs -- '--password-store=kwallet6' "$HOME/.local/share/applications/brave-browser.desktop" \
+            "$HOME/.var/app/com.brave.Browser/config/brave-flags.conf" && ok "Brave uses KWallet" || bad "Brave KWallet flag not set"
+        busctl --user list 2>/dev/null | grep -qi kwalletd && ok "KWallet service available" || bad "KWallet not running yet (it starts when Brave asks)"
+        echo "Caelestia option names (from the installed shell)"
+        q="$HOME/.config/quickshell/caelestia/config"
+        for k in persistent showOnHover lockBeforeSleep timeouts; do
+            grep -rqs "$k" "$q" && ok "$k" || bad "$k not found: that setting may be ignored"
+        done ;;
+    undo)
+        last=$(ls -1tr "$HOME/.local/share/rice/backups/"*.tar.gz 2>/dev/null | head -1)
+        [ -n "$last" ] || { echo "No backup found."; exit 1; }
+        echo "Restoring $last"
+        tar -xzf "$last" -C "$HOME"
+        manifest="${last%.tar.gz}.new"
+        [ -f "$manifest" ] && while IFS= read -r f; do rm -f "$HOME/$f"; done < "$manifest"
+        # never bring back the old second autostart block that stopped Caelestia from starting
+        python3 - <<'PY'
+import os, re
+p = os.path.expanduser("~/.config/hypr/hyprland/execs.lua")
+try:
+    s = open(p).read()
+    open(p, "w").write(re.sub(r"\n-- Waybar top bar.*?\nend\)\n?", "\n", s, flags=re.S))
+except OSError:
+    pass
+PY
+        echo "Done. Log out and back in." ;;
+    ""|-h|--help|help) usage ;;
+    *) usage; exit 1 ;;
+esac

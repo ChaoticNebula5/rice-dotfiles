@@ -1,0 +1,372 @@
+#!/usr/bin/env bash
+# rice-boot: themed login screen (SDDM), boot animation (Plymouth) and boot menu (GRUB),
+# all matched to your current Caelestia wallpaper and colours. Fedora, UEFI, dual boot safe.
+#
+#   rice-boot                 install everything (asks for your password)
+#   rice-boot sync            re-match login screen + boot menu to the current wallpaper
+#   rice-boot plymouth NAME   switch boot animation (e.g. rings, cuts, circle_hud, hexagon_dots)
+#   rice-boot test            preview the login screen in a window (close it to finish)
+#   rice-boot undo            put back the original login screen, boot animation and boot menu
+set -u
+R="${RICE_ROOT:-}"                       # test hook: fake filesystem root
+SRC="$HOME/src"
+DEFAULT_ANIM="hexagon_dots"
+SDDM_DIR="$R/usr/share/sddm/themes/sddm-astronaut-theme"
+GRUB_THEME_DIR="$R/boot/grub2/themes/rice"
+BK_ROOT="$R/var/backups"
+TS="$(date +%Y%m%d-%H%M%S)"
+WARN=()
+
+c1=$'\033[1;35m'; c2=$'\033[32m'; c3=$'\033[33m'; c0=$'\033[0m'
+step() { printf '\n%s==> %s%s\n' "$c1" "$*" "$c0"; }
+ok()   { printf '   %sOK%s  %s\n' "$c2" "$c0" "$*"; }
+warn() { printf '   %s!!%s  %s\n' "$c3" "$c0" "$*"; WARN+=("$*"); }
+die()  { printf '%s!! %s%s\n' "$c3" "$*" "$c0"; exit 1; }
+
+[ "$(id -u)" = 0 ] && [ -z "${RICE_TEST:-}" ] && die "Run as yourself, not with sudo."
+
+# ---------------------------------------------------------------------------
+# helpers
+# ---------------------------------------------------------------------------
+current_wallpaper() {
+    python3 - <<'PY'
+import os, subprocess, glob
+home = os.path.expanduser("~")
+cands = []
+try:
+    out = subprocess.run(["caelestia", "shell", "wallpaper", "get"], capture_output=True, text=True, timeout=5).stdout.strip()
+    cands.append(out)
+except Exception:
+    pass
+for p in (f"{home}/.local/state/caelestia/wallpaper/path.txt",):
+    try: cands.append(open(p).read().strip())
+    except OSError: pass
+cands.append(f"{home}/.local/state/caelestia/wallpaper/current")
+imgs = sorted(glob.glob(f"{home}/Pictures/Wallpapers/*.*"), key=os.path.getmtime, reverse=True)
+cands += imgs
+for c in cands:
+    if c and os.path.isfile(os.path.realpath(c)):
+        print(os.path.realpath(c)); break
+PY
+}
+
+screen_size() {
+    hyprctl monitors -j 2>/dev/null | python3 -c '
+import json, sys
+try:
+    m = json.load(sys.stdin)[0]; print(m["width"], m["height"])
+except Exception:
+    print(1920, 1200)' 2>/dev/null || echo "1920 1200"
+}
+
+# Builds /tmp files: login.png (SDDM background), grub.png (blurred, dark), colours.json
+make_images() {
+    local wall="$1" w="$2" h="$3" out="$4"
+    python3 - "$wall" "$w" "$h" "$out" <<'PY'
+import json, os, sys
+from PIL import Image, ImageFilter, ImageEnhance
+wall, W, H, out = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4]
+os.makedirs(out, exist_ok=True)
+img = Image.open(wall).convert("RGB")
+# cover-crop to the screen
+r = max(W / img.width, H / img.height)
+img = img.resize((round(img.width * r), round(img.height * r)), Image.LANCZOS)
+l, t = (img.width - W) // 2, (img.height - H) // 2
+img = img.crop((l, t, l + W, t + H))
+img.save(f"{out}/login.png", optimize=True)
+g = img.filter(ImageFilter.GaussianBlur(18))
+g = ImageEnhance.Brightness(g).enhance(0.45)
+g.save(f"{out}/grub.png", optimize=True)
+
+home = os.path.expanduser("~")
+cols = {"surface": "131317", "surfaceContainerHigh": "2a292e", "primary": "c2c1ff",
+        "onSurface": "e5e1e7", "onSurfaceVariant": "c7c5d0", "tertiary": "e8b9d5"}
+try:
+    c = json.load(open(f"{home}/.local/state/caelestia/scheme.json")).get("colours", {})
+    for k in cols:
+        sk = "".join("_" + ch.lower() if ch.isupper() else ch for ch in k)
+        v = c.get(k) or c.get(sk)
+        if v: cols[k] = str(v).lstrip("#")[:6]
+except Exception:
+    pass
+json.dump(cols, open(f"{out}/colours.json", "w"))
+PY
+}
+
+# astronaut.conf -> rice.conf with our background, colours, 12h clock, screen size
+make_sddm_conf() {
+    local base="$1" out="$2" cols="$3" w="$4" h="$5"
+    python3 - "$base" "$out" "$cols" "$w" "$h" <<'PY'
+import json, re, sys
+base, out, cols, W, H = sys.argv[1:6]
+c = json.load(open(cols))
+s = open(base).read()
+swap = {"21222c": c["surface"], "222222": c["surfaceContainerHigh"], "343746": c["surfaceContainerHigh"],
+        "b7cef1": c["primary"], "ffffff": c["onSurface"], "f8f8f2": c["onSurface"], "bbbbbb": c["onSurfaceVariant"]}
+s = re.sub(r"#([0-9a-fA-F]{6})\b", lambda m: "#" + swap.get(m.group(1).lower(), m.group(1)), s)
+for key, val in (("TimeTextColor", c["primary"]), ("HoverUserIconColor", c["primary"])):
+    s = re.sub(rf'(?m)^{key}=.*$', f'{key}="#{val}"', s)
+s = re.sub(r'(?m)^Background=.*$', 'Background="Backgrounds/rice.png"', s)
+s = re.sub(r'(?m)^ScreenWidth=.*$', f'ScreenWidth="{W}"', s)
+s = re.sub(r'(?m)^ScreenHeight=.*$', f'ScreenHeight="{H}"', s)
+s = s.replace('"HH:mm"', '"hh:mm AP"')
+open(out, "w").write(s)
+PY
+}
+
+grub_apply_background() {
+    local dir="$1" png="$2" cols="$3"
+    local name
+    name=$(sudo python3 - "$dir/theme.txt" "$cols" <<'PY'
+import json, re, sys
+p = sys.argv[1]
+c = json.load(open(sys.argv[2]))
+s = open(p).read()
+s = re.sub(r'(?m)^(\s*desktop-color\s*:\s*)"#[0-9a-fA-F]{6}"', rf'\1"#{c["surface"]}"', s)
+s = re.sub(r'(?m)^(\s*item_color\s*=\s*)"#[0-9a-fA-F]{6}"', rf'\1"#{c["onSurfaceVariant"]}"', s)
+s = re.sub(r'(?m)^(\s*selected_item_color\s*=\s*)"#[0-9a-fA-F]{6}"', rf'\1"#{c["primary"]}"', s)
+s = re.sub(r'(?m)^(\s*color\s*=\s*)"#[0-9a-fA-F]{6}"', rf'\1"#{c["onSurfaceVariant"]}"', s)
+open(p, "w").write(s)
+m = re.search(r'(?m)^\s*desktop-image\s*:\s*"([^"]+)"', s)
+if m:
+    print(m.group(1))
+else:
+    s = s.rstrip("\n") + '\ndesktop-image: "background.png"\n'
+    open(p, "w").write(s)
+    print("background.png")
+PY
+)
+    sudo install -m 644 "$png" "$dir/$name"
+}
+
+sddm_set_current() {
+    sudo python3 - "$R" <<'PY'
+import glob, os, re, sys
+R = sys.argv[1]
+main = f"{R}/etc/sddm.conf"
+files = [main] + sorted(glob.glob(f"{R}/etc/sddm.conf.d/*.conf"))
+for p in files:
+    if not os.path.exists(p):
+        continue
+    s = open(p).read()
+    if re.search(r"(?m)^\s*Current\s*=", s):
+        s = re.sub(r"(?m)^\s*Current\s*=.*$", "Current=sddm-astronaut-theme", s)
+        open(p, "w").write(s)
+# make sure the main file sets it (it is read last, so it wins)
+s = open(main).read() if os.path.exists(main) else ""
+if not re.search(r"(?m)^Current=sddm-astronaut-theme$", s):
+    if re.search(r"(?m)^\[Theme\]\s*$", s):
+        s = re.sub(r"(?m)^\[Theme\]\s*$", "[Theme]\nCurrent=sddm-astronaut-theme", s, count=1)
+    else:
+        s = s.rstrip("\n") + "\n\n[Theme]\nCurrent=sddm-astronaut-theme\n"
+    open(main, "w").write(s)
+print("   sddm: theme set to sddm-astronaut-theme")
+PY
+}
+
+grub_edit_defaults() {
+    sudo python3 - "$R" "$1" <<'PY'
+import re, sys
+R, mode = sys.argv[1], sys.argv[2]
+p = f"{R}/etc/default/grub"
+s = open(p).read()
+def setv(key, val):
+    global s
+    line = f'{key}="{val}"'
+    if re.search(rf'(?m)^{key}=', s):
+        s = re.sub(rf'(?m)^{key}=.*$', line, s)
+    else:
+        s = s.rstrip("\n") + "\n" + line + "\n"
+if mode == "theme":
+    s = re.sub(r'(?m)^(GRUB_TERMINAL_OUTPUT="?console"?)\s*$', r'#\1', s)
+    setv("GRUB_TERMINAL_OUTPUT", "gfxterm")
+    setv("GRUB_THEME", "/boot/grub2/themes/rice/theme.txt")
+    setv("GRUB_GFXMODE", "auto")
+    setv("GRUB_TIMEOUT_STYLE", "menu")
+    if not re.search(r'(?m)^GRUB_TIMEOUT=', s):
+        setv("GRUB_TIMEOUT", "5")
+elif mode == "osprober":
+    setv("GRUB_DISABLE_OS_PROBER", "false")
+open(p, "w").write(s)
+PY
+}
+
+grub_rebuild() {
+    sudo grub2-mkconfig -o "$R/boot/grub2/grub.cfg" 2>&1 | tee /tmp/rice-grub.log | sed 's/^/   /'
+}
+
+latest_backup() { ls -1d "$BK_ROOT"/rice-boot-* 2>/dev/null | sort | tail -1; }
+
+# ---------------------------------------------------------------------------
+cmd_install() {
+    command -v caelestia >/dev/null || warn "caelestia not found: using the newest wallpaper in ~/Pictures/Wallpapers"
+
+    step "1/7  Snapshot + packages"
+    if command -v snapper >/dev/null && sudo snapper create -d "pre-rice-boot $TS"; then ok "snapper snapshot 'pre-rice-boot $TS'"
+    else warn "no snapshot taken (backups below still cover every file changed)"; fi
+    sudo dnf install -y --skip-unavailable git python3-pillow plymouth-plugin-script \
+        qt6-qtsvg qt6-qtvirtualkeyboard qt6-qtmultimedia || warn "dnf reported a problem"
+    python3 -c "import PIL" 2>/dev/null || die "python3-pillow missing; cannot build the backgrounds"
+
+    step "2/7  Backing up the current login, boot animation and boot menu settings"
+    local BK="$BK_ROOT/rice-boot-$TS"
+    sudo mkdir -p "$BK"
+    for f in /etc/sddm.conf /etc/default/grub /boot/grub2/grub.cfg /boot/grub2/grubenv /etc/plymouth/plymouthd.conf; do
+        [ -e "$R$f" ] && sudo install -D -m 600 "$R$f" "$BK$f"
+    done
+    [ -d "$R/etc/sddm.conf.d" ] && sudo cp -a "$R/etc/sddm.conf.d" "$BK/etc/" 2>/dev/null
+    (plymouth-set-default-theme 2>/dev/null || echo bgrt) | sudo tee "$BK/plymouth-theme" >/dev/null
+    ok "saved in $BK  (undo: rice-boot undo)"
+
+    step "3/7  Downloading themes"
+    mkdir -p "$SRC"
+    if [ -d "$SRC/sddm-astronaut-theme/.git" ]; then git -C "$SRC/sddm-astronaut-theme" pull -q --ff-only || true
+    else git clone -q --depth 1 https://github.com/Keyitdev/sddm-astronaut-theme.git "$SRC/sddm-astronaut-theme" || die "could not download the login theme"; fi
+    if [ ! -d "$SRC/catppuccin-grub/.git" ]; then
+        git clone -q --depth 1 https://github.com/catppuccin/grub.git "$SRC/catppuccin-grub" || die "could not download the boot menu theme"
+    fi
+    ok "login theme + boot menu theme"
+
+    local WALL SIZE W H TMP
+    WALL="$(current_wallpaper)"
+    [ -n "$WALL" ] || die "no wallpaper found"
+    SIZE="$(screen_size)"; W="${SIZE% *}"; H="${SIZE#* }"
+    TMP="$(mktemp -d)"
+    make_images "$WALL" "$W" "$H" "$TMP" || die "could not process the wallpaper"
+    ok "matched to $(basename "$WALL") at ${W}x${H}"
+
+    step "4/7  Login screen (SDDM)"
+    sudo rm -rf "$SDDM_DIR"
+    sudo mkdir -p "$(dirname "$SDDM_DIR")"
+    sudo cp -r "$SRC/sddm-astronaut-theme" "$SDDM_DIR"
+    sudo rm -rf "$SDDM_DIR/.git"
+    sudo mkdir -p "$R/usr/share/fonts/sddm-astronaut"
+    sudo cp -r "$SDDM_DIR"/Fonts/* "$R/usr/share/fonts/sddm-astronaut/" 2>/dev/null
+    command -v fc-cache >/dev/null && sudo fc-cache -f >/dev/null 2>&1
+    login_sync_files "$TMP" "$W" "$H"
+    sddm_set_current
+    ok "login screen installed (preview it with: rice-boot test)"
+
+    step "5/7  Boot animation (Plymouth)"
+    install_plymouth "$DEFAULT_ANIM"
+
+    step "6/7  Boot menu (GRUB)"
+    install_grub "$TMP"
+
+    step "7/7  Saving rice-boot for later"
+    mkdir -p "$HOME/.local/bin"
+    if [ "$(realpath "$0")" != "$(realpath "$HOME/.local/bin/rice-boot" 2>/dev/null)" ]; then
+        install -m 755 "$0" "$HOME/.local/bin/rice-boot"
+    fi
+    ok "rice-boot sync | plymouth NAME | test | undo"
+    rm -rf "$TMP"
+
+    printf '\n%s==> Done.%s\n' "$c1" "$c0"
+    if [ ${#WARN[@]} -gt 0 ]; then echo "Things to look at:"; for x in "${WARN[@]}"; do echo "  - $x"; done; fi
+    cat <<EOF
+
+Next:
+  1. Preview the login screen now:   rice-boot test     (close the window when done)
+  2. Reboot to see the boot menu, boot animation and login screen for real.
+Changed your wallpaper later?        rice-boot sync
+Undo all of it:                      rice-boot undo
+EOF
+}
+
+login_sync_files() {
+    local TMP="$1" W="$2" H="$3"
+    sudo install -m 644 "$TMP/login.png" "$SDDM_DIR/Backgrounds/rice.png"
+    make_sddm_conf "$SDDM_DIR/Themes/astronaut.conf" "$TMP/rice.conf" "$TMP/colours.json" "$W" "$H"
+    sudo install -m 644 "$TMP/rice.conf" "$SDDM_DIR/Themes/rice.conf"
+    sudo sed -i 's|^ConfigFile=.*|ConfigFile=Themes/rice.conf|' "$SDDM_DIR/metadata.desktop"
+}
+
+install_plymouth() {
+    local name="$1"
+    if lsblk -no TYPE 2>/dev/null | grep -q crypt; then
+        warn "your disk is encrypted: with this animation the disk password prompt may appear as plain text"
+        if [ -t 0 ]; then
+            read -r -p "   Use the animation anyway? [y/N] " a
+            case "$a" in y|Y) ;; *) warn "boot animation skipped (kept Fedora's)"; return ;; esac
+        fi
+    fi
+    local repo="$SRC/plymouth-themes"
+    if [ ! -d "$repo/.git" ]; then
+        git clone -q --depth 1 --filter=blob:none --sparse https://github.com/adi1090x/plymouth-themes.git "$repo" \
+            || { warn "could not download boot animations"; return; }
+    fi
+    git -C "$repo" sparse-checkout set --no-cone "/pack_*/$name/" >/dev/null 2>&1
+    local dir
+    dir=$(find "$repo" -mindepth 2 -maxdepth 2 -type d -name "$name" | head -1)
+    [ -n "$dir" ] || { warn "boot animation '$name' not found (names: see the adi1090x/plymouth-themes README)"; return; }
+    sudo rm -rf "$R/usr/share/plymouth/themes/$name"
+    sudo cp -r "$dir" "$R/usr/share/plymouth/themes/$name"
+    echo "   rebuilding the boot image (about a minute)..."
+    # shellcheck disable=SC2024  # the log is ours, not root's
+    if sudo plymouth-set-default-theme -R "$name" >/tmp/rice-plymouth.log 2>&1; then ok "boot animation: $name"
+    else warn "plymouth could not set '$name' (see /tmp/rice-plymouth.log); Fedora's stays"; fi
+}
+
+install_grub() {
+    local TMP="$1" had_win=0
+    grep -qi "windows" "$R/boot/grub2/grub.cfg" 2>/dev/null && had_win=1
+    local avail
+    avail=$(df --output=avail -k "$R/boot" 2>/dev/null | tail -1 | tr -d ' ')
+    if [ -n "$avail" ] && [ "$avail" -lt 20000 ]; then warn "/boot is almost full; boot menu theme skipped"; return; fi
+    sudo rm -rf "$GRUB_THEME_DIR"
+    sudo mkdir -p "$(dirname "$GRUB_THEME_DIR")"
+    sudo cp -r "$SRC/catppuccin-grub/src/catppuccin-mocha-grub-theme" "$GRUB_THEME_DIR" || { warn "boot menu theme files missing"; return; }
+    grub_apply_background "$GRUB_THEME_DIR" "$TMP/grub.png" "$TMP/colours.json"
+    grub_edit_defaults theme
+    sudo grub2-editenv - unset menu_auto_hide 2>/dev/null
+    grub_rebuild
+    grep -q "Found theme" /tmp/rice-grub.log && ok "boot menu theme found by GRUB" || warn "GRUB did not report the theme (see /tmp/rice-grub.log)"
+    if [ "$had_win" = 1 ] && ! grep -qi "windows" "$R/boot/grub2/grub.cfg"; then
+        warn "Windows entry disappeared; enabling os-prober and rebuilding"
+        grub_edit_defaults osprober
+        grub_rebuild
+        if ! grep -qi "windows" "$R/boot/grub2/grub.cfg"; then
+            local BK; BK="$(latest_backup)"
+            sudo cp "$BK/etc/default/grub" "$R/etc/default/grub"
+            sudo cp "$BK/boot/grub2/grub.cfg" "$R/boot/grub2/grub.cfg"
+            warn "still no Windows entry: restored your original boot menu, theme NOT applied"
+            return
+        fi
+    fi
+    [ "$had_win" = 1 ] && ok "Windows is still in the boot menu"
+}
+
+cmd_sync() {
+    local WALL SIZE W H TMP
+    WALL="$(current_wallpaper)"; [ -n "$WALL" ] || die "no wallpaper found"
+    SIZE="$(screen_size)"; W="${SIZE% *}"; H="${SIZE#* }"
+    TMP="$(mktemp -d)"
+    make_images "$WALL" "$W" "$H" "$TMP" || die "could not process the wallpaper"
+    if [ -d "$SDDM_DIR" ]; then login_sync_files "$TMP" "$W" "$H"; ok "login screen matched to $(basename "$WALL")"; fi
+    if [ -d "$GRUB_THEME_DIR" ]; then grub_apply_background "$GRUB_THEME_DIR" "$TMP/grub.png" "$TMP/colours.json"; ok "boot menu background updated"; fi
+    rm -rf "$TMP"
+}
+
+cmd_undo() {
+    local BK; BK="$(ls -1d "$BK_ROOT"/rice-boot-* 2>/dev/null | sort | head -1)"
+    [ -n "$BK" ] || die "no backup found"
+    echo "Restoring from $BK"
+    for f in /etc/sddm.conf /etc/default/grub /boot/grub2/grub.cfg /boot/grub2/grubenv /etc/plymouth/plymouthd.conf; do
+        [ -e "$BK$f" ] && sudo cp "$BK$f" "$R$f"
+    done
+    [ -d "$BK/etc/sddm.conf.d" ] && sudo cp -a "$BK/etc/sddm.conf.d/." "$R/etc/sddm.conf.d/"
+    local t; t="$(cat "$BK/plymouth-theme" 2>/dev/null || echo bgrt)"
+    echo "   rebuilding the boot image with '$t' (about a minute)..."
+    sudo plymouth-set-default-theme -R "$t" >/dev/null 2>&1 && ok "boot animation: $t"
+    ok "login screen and boot menu restored. Reboot to see it."
+}
+
+case "${1:-install}" in
+    install) cmd_install ;;
+    sync) cmd_sync ;;
+    plymouth) [ -n "${2:-}" ] || die "rice-boot plymouth NAME"; install_plymouth "$2" ;;
+    test) command -v sddm-greeter-qt6 >/dev/null && sddm-greeter-qt6 --test-mode --theme "$SDDM_DIR" \
+            || sddm-greeter --test-mode --theme "$SDDM_DIR" ;;
+    undo) cmd_undo ;;
+    *) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//' ;;
+esac

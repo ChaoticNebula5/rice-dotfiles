@@ -1,0 +1,44 @@
+  RICE KEYS                                   (Super+/ shows this, Enter closes)
+
+  APPS
+    tap Super ............ search apps (like the Windows Start menu)
+    Super+T .............. terminal (kitty)
+    Super+W .............. Brave
+    Super+E .............. files (Dolphin)
+    Super+G .............. panel grid: btop, matrix, clock, visualiser
+    Super+V .............. clipboard history
+    Super+Period ......... emoji picker
+
+  WINDOWS
+    Super+Q .............. close
+    Super+F .............. fullscreen          Super+Alt+F  maximise
+    Super+Alt+Space ...... float / unfloat     Super+P      pin on top
+    Super+arrows ......... move focus          Super+Shift+arrows  move window
+    Super+drag ........... move window         Super+right-drag    resize
+    Alt+Tab .............. cycle windows
+
+  WORKSPACES
+    Super+1..9 ........... go to workspace
+    Super+Alt+1..9 ....... send window there
+    Super+Shift+1..9 ..... send window there, stay here
+    Super+scroll ......... previous / next workspace
+
+  SCREEN
+    Print ................ screenshot (full)
+    Super+Shift+S ........ screenshot a region
+    Ctrl+Alt+R ........... record screen        Super+Shift+C  colour picker
+
+  SYSTEM
+    Super+L .............. lock
+    Super+N .............. notifications / sidebar
+    Super+K .............. show all Caelestia panels
+    Ctrl+Alt+Delete ...... session menu (log out, restart, shut down)
+    Super+Alt+P .......... vibrance on/off
+    Super+Alt+M .......... leave Hyprland (emergency exit)
+
+  MOUSE
+    top-centre edge ...... dashboard (CPU, RAM, media, weather)
+    left edge ............ Caelestia bar
+
+  TERMINAL COMMAND
+    rice ................. bar / vibrance / borders / pfp / doctor / undo

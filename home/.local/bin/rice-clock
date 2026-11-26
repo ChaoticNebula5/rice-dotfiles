@@ -1,0 +1,98 @@
+#!/usr/bin/env python3
+"""rice-clock: big pixel clock for the HUD (LeyzS style), coloured from the Caelestia scheme."""
+import json
+import os
+import shutil
+import signal
+import sys
+import time
+
+FONT = {
+    "0": ["#####", "#...#", "#..##", "#.#.#", "##..#", "#...#", "#####"],
+    "1": ["..#..", ".##..", "..#..", "..#..", "..#..", "..#..", ".###."],
+    "2": ["#####", "....#", "....#", "#####", "#....", "#....", "#####"],
+    "3": ["#####", "....#", "....#", ".####", "....#", "....#", "#####"],
+    "4": ["#...#", "#...#", "#...#", "#####", "....#", "....#", "....#"],
+    "5": ["#####", "#....", "#....", "#####", "....#", "....#", "#####"],
+    "6": ["#####", "#....", "#....", "#####", "#...#", "#...#", "#####"],
+    "7": ["#####", "....#", "...#.", "..#..", "..#..", "..#..", "..#.."],
+    "8": ["#####", "#...#", "#...#", "#####", "#...#", "#...#", "#####"],
+    "9": ["#####", "#...#", "#...#", "#####", "....#", "....#", "#####"],
+    ":": [".", "#", "#", ".", "#", "#", "."],
+    " ": [".", ".", ".", ".", ".", ".", "."],
+}
+SCHEME = os.path.expanduser("~/.local/state/caelestia/scheme.json")
+
+
+def colours():
+    out = {"primary": "c2c1ff", "onSurfaceVariant": "c7c5d0"}
+    try:
+        c = json.load(open(SCHEME)).get("colours", {})
+        for k in out:
+            v = c.get(k) or c.get("".join("_" + ch.lower() if ch.isupper() else ch for ch in k))
+            if v:
+                out[k] = str(v).lstrip("#")[:6]
+    except Exception:
+        pass
+    return {k: tuple(int(v[i:i + 2], 16) for i in (0, 2, 4)) for k, v in out.items()}
+
+
+def fg(rgb):
+    return "\033[38;2;%d;%d;%dm" % rgb
+
+
+def render(text, sx, sy):
+    rows = []
+    for y in range(7):
+        line = ""
+        for i, ch in enumerate(text):
+            glyph = FONT[ch][y]
+            line += "".join(("█" if p == "#" else " ") * sx for p in glyph)
+            if i < len(text) - 1:
+                line += " " * sx
+        rows.extend([line] * sy)
+    return rows
+
+
+def width_of(text, sx):
+    return sum(len(FONT[c][0]) * sx for c in text) + (len(text) - 1) * sx
+
+
+def main():
+    sys.stdout.write("\033[?1049h\033[?25l")
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    pal, last_pal = colours(), time.time()
+    try:
+        while True:
+            if time.time() - last_pal > 30:
+                pal, last_pal = colours(), time.time()
+            now = time.localtime()
+            colon = ":" if now.tm_sec % 2 == 0 else " "
+            text = time.strftime("%H", now) + colon + time.strftime("%M", now)
+            cols, lines = shutil.get_terminal_size((60, 20))
+            sx = 2
+            while width_of(text, sx + 2) <= cols - 4 and 7 * (sx // 2 + 1) + 4 <= lines:
+                sx += 2
+            sy = max(1, sx // 2)
+            art = render(text, sx, sy)
+            date = time.strftime("%A  ·  %d %B %Y", now)
+            block = len(art) + 2
+            top = max(0, (lines - block) // 2)
+            out = ["\033[H\033[2J"]
+            for i, row in enumerate(art):
+                pad = max(0, (cols - len(row)) // 2)
+                out.append("\033[%d;%dH%s\033[1m%s" % (top + i + 1, pad + 1, fg(pal["primary"]), row))
+            pad = max(0, (cols - len(date)) // 2)
+            out.append("\033[0m\033[%d;%dH%s%s\033[0m" % (top + len(art) + 2, pad + 1, fg(pal["onSurfaceVariant"]), date))
+            sys.stdout.write("".join(out))
+            sys.stdout.flush()
+            time.sleep(1 - (time.time() % 1) + 0.01)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        sys.stdout.write("\033[0m\033[?25h\033[?1049l")
+        sys.stdout.flush()
+
+
+if __name__ == "__main__":
+    main()
